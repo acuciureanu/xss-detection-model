@@ -695,20 +695,31 @@ function loadConfig(configPath) {
 
 async function runFuzzer(configPath) {
   console.log("Starting runFuzzer function...");
+
+  console.log("Loading configuration...");
   const runConfig = loadConfig(configPath);
+  console.log("Configuration loaded successfully.");
+
   console.log("Starting XSS fuzzer with the following configuration:");
   console.log(JSON.stringify(runConfig, null, 2));
 
-  const numCPUs = Math.min(os.cpus().length, runConfig.maxWorkers);
+  console.log("Initializing PayloadGenerator...");
   const payloadGenerator = new PayloadGenerator();
+  console.log("PayloadGenerator initialized.");
+
+  const numCPUs = Math.min(os.cpus().length, runConfig.maxWorkers);
+  console.log(`Using ${numCPUs} worker threads`);
+
   const workQueue = new AsyncQueue();
-  let results = [];
+  console.log("Work queue initialized");
+
+  const results = [];
   let activeWorkers = 0;
+  let totalProcessedPayloads = 0;
+  let lastProcessedCount = 0;
+  let stuckCounter = 0;
 
-  console.log(`Starting fuzzer with ${numCPUs} worker threads...`);
-
-  // Populate work queue
-  console.log("Generating payloads...");
+  console.log("Starting to generate payloads...");
   let payloadCount = 0;
   for (const payload of payloadGenerator.generateDynamicPayloads()) {
     if (payload) {
@@ -721,7 +732,12 @@ async function runFuzzer(configPath) {
   }
   console.log(`Total payloads generated: ${payloadCount}`);
 
-  const resultsStream = fs.createWriteStream(config.reportFile, { flags: 'a' });
+  if (payloadCount === 0) {
+    console.error("No payloads were generated. Exiting...");
+    return;
+  }
+
+  const resultsStream = fs.createWriteStream(runConfig.reportFile, { flags: 'a' });
 
   function createWorker() {
     console.log("Creating new worker...");
@@ -736,7 +752,8 @@ async function runFuzzer(configPath) {
         message.data.forEach(result => {
           resultsStream.write(JSON.stringify(result) + '\n');
         });
-        console.log(`Processed ${message.data.length} results.`);
+        totalProcessedPayloads += message.data.length;
+        console.log(`Processed ${message.data.length} results. Total processed: ${totalProcessedPayloads}`);
       } else if (message && message.type === 'ready') {
         console.log("Worker ready, sending next payload...");
         workQueue.pop().then(payload => {
@@ -754,35 +771,21 @@ async function runFuzzer(configPath) {
       console.error(`Worker error: ${error.message}`);
     });
 
-    worker.on('exit', async (code) => {
+    worker.on('exit', (code) => {
       activeWorkers--;
       console.log(`Worker exited with code ${code}. Active workers: ${activeWorkers}`);
       if (code !== 0) {
         console.error(`Worker stopped with exit code ${code}`);
       }
       if (activeWorkers === 0) {
-        resultsStream.end();
         console.log('All workers completed. Processing final results...');
-        await processFinalResults(config.reportFile);
+        resultsStream.end();
+        presentFinalStats(results, payloadCount, totalProcessedPayloads);
+        process.exit(0);
       }
     });
 
     return worker;
-  }
-
-  async function processFinalResults(filePath) {
-    const fileStream = fs.createReadStream(filePath);
-    const rl = readline.createInterface({
-      input: fileStream,
-      crlfDelay: Infinity
-    });
-
-    const results = [];
-    for await (const line of rl) {
-      results.push(JSON.parse(line));
-    }
-
-    processResults(results);
   }
 
   // Create initial set of workers
@@ -791,6 +794,71 @@ async function runFuzzer(configPath) {
     createWorker();
   }
   console.log("Initial workers created, waiting for completion...");
+
+  // Implement a timeout and progress checking
+  const timeout = setInterval(() => {
+    console.log(`Progress: ${totalProcessedPayloads}/${payloadCount} payloads processed`);
+    if (totalProcessedPayloads === lastProcessedCount) {
+      stuckCounter++;
+      console.warn(`No progress made in the last ${stuckCounter} check(s)`);
+      if (stuckCounter >= 5) {
+        console.error("Fuzzer appears to be stuck. Forcing termination...");
+        process.exit(1);
+      }
+    } else {
+      stuckCounter = 0;
+      lastProcessedCount = totalProcessedPayloads;
+    }
+
+    if (totalProcessedPayloads >= payloadCount) {
+      clearInterval(timeout);
+      console.log("All payloads processed. Waiting for workers to complete...");
+    }
+  }, 60000); // Check progress every minute
+
+  // Wait for all workers to complete
+  while (activeWorkers > 0) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    console.log(`Waiting for workers to complete. Active workers: ${activeWorkers}`);
+  }
+
+  clearInterval(timeout);
+  console.log("Fuzzing completed successfully.");
+}
+
+function presentFinalStats(results, totalPayloads, processedPayloads) {
+  console.log("\n--- Final Fuzzing Statistics ---");
+  console.log(`Total payloads generated: ${totalPayloads}`);
+  console.log(`Total payloads processed: ${processedPayloads}`);
+  console.log(`Total results: ${results.length}`);
+
+  const byCategory = results.reduce((acc, result) => {
+    acc[result.category] = (acc[result.category] || 0) + 1;
+    return acc;
+  }, {});
+
+  console.log("\nResults by category:");
+  Object.entries(byCategory)
+    .sort((a, b) => b[1] - a[1])
+    .forEach(([category, count]) => {
+      console.log(`${category}: ${count}`);
+    });
+
+  const byEncoding = results.reduce((acc, result) => {
+    acc[result.encoding] = (acc[result.encoding] || 0) + 1;
+    return acc;
+  }, {});
+
+  console.log("\nTop 5 encodings with potential bypasses:");
+  Object.entries(byEncoding)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .forEach(([encoding, count]) => {
+      console.log(`${encoding}: ${count}`);
+    });
+
+  console.log(`\nFull report written to ${config.reportFile}`);
+  console.log("--- End of Fuzzing Statistics ---");
 }
 
 if (!isMainThread) {
@@ -813,7 +881,7 @@ if (!isMainThread) {
           for (const result of fuzzEncodings(mutatedPayload)) {
             if (result) {
               results.push(result);
-              if (safelyAccessLength(results) >= workerConfig.batchSize) {
+              if (results.length >= workerConfig.batchSize) {
                 console.log(`Sending batch of ${results.length} results`);
                 parentPort.postMessage({ type: 'result', data: results });
                 results.length = 0;  // Clear the results array
@@ -823,10 +891,11 @@ if (!isMainThread) {
         }
       }
     }
-    if (safelyAccessLength(results) > 0) {
+    if (results.length > 0) {
       console.log(`Sending final batch of ${results.length} results`);
       parentPort.postMessage({ type: 'result', data: results });
     }
+    console.log("Payload processing completed.");
   }
 
   parentPort.on('message', (message) => {
@@ -842,13 +911,36 @@ if (!isMainThread) {
   parentPort.postMessage({ type: 'ready' });
 }
 
-// Add these lines at the end of your file
+async function main() {
+  try {
+    console.log("Starting main function...");
+
+    console.log("Checking supported encodings...");
+    const supportedEncodings = getSupportedEncodings(config.encodings);
+    console.log("Supported encodings:", supportedEncodings);
+
+    console.log("Loading configuration...");
+    const configPath = process.argv[2] || './fuzzer-config.json';
+    console.log(`Using config path: ${configPath}`);
+
+    console.log("Initializing fuzzer...");
+    await runFuzzer(configPath);
+
+    console.log("Fuzzer execution completed successfully.");
+  } catch (error) {
+    console.error("An error occurred during fuzzer execution:");
+    console.error(error);
+    if (error.stack) {
+      console.error("Stack trace:");
+      console.error(error.stack);
+    }
+  }
+}
+
 if (require.main === module) {
   console.log("Script running as main module");
-  const configPath = process.argv[2] || './fuzzer-config.json';
-  console.log(`Using config path: ${configPath}`);
-  runFuzzer(configPath).catch(error => {
-    console.error(`Fuzzer execution failed: ${error.message}`);
+  main().catch(error => {
+    console.error(`Unexpected error in main function: ${error.message}`);
     console.error(error.stack);
     process.exit(1);
   });
@@ -863,5 +955,3 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
 });
-
-module.exports = { runFuzzer, PayloadGenerator, processResults };
