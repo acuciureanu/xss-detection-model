@@ -4,7 +4,6 @@
   "description": "",
   "main": "fuzzer.js",
   "scripts": {
-    "run": "node fuzzer.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
