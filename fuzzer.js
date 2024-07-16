@@ -6,26 +6,47 @@ const os = require('os');
 const Iconv = require('iconv-lite');
 const crypto = require('crypto');
 const fs = require('fs');
+const readline = require('readline');
+const path = require('path');
 
 // Configuration object
 const config = {
   maxPayloads: 1000,
-  encodings: ['ISO-2022-JP'],
-  // encodings: [
-  //   'UTF-8', 'UTF-16LE', 'UTF-16BE',
-  //   'ISO-8859-1', 'ISO-8859-2', 'ISO-8859-3', 'ISO-8859-4', 'ISO-8859-5',
-  //   'ISO-8859-6', 'ISO-8859-7', 'ISO-8859-8', 'ISO-8859-9', 'ISO-8859-10',
-  //   'ISO-8859-13', 'ISO-8859-14', 'ISO-8859-15', 'ISO-8859-16',
-  //   'windows-1250', 'windows-1251', 'windows-1252', 'windows-1253', 'windows-1254',
-  //   'windows-1255', 'windows-1256', 'windows-1257', 'windows-1258',
-  //   'KOI8-R', 'KOI8-U', 'ASCII', 'ISO-2022-JP'
-  // ],
+  encodings: getSupportedEncodings([
+    'UTF-8', 'UTF-16LE', 'UTF-16BE', 'UTF-7',
+    'ISO-8859-1', 'ISO-8859-2', 'ISO-8859-3', 'ISO-8859-4', 'ISO-8859-5',
+    'ISO-8859-6', 'ISO-8859-7', 'ISO-8859-8', 'ISO-8859-9', 'ISO-8859-10',
+    'ISO-8859-13', 'ISO-8859-14', 'ISO-8859-15', 'ISO-8859-16',
+    'windows-1250', 'windows-1251', 'windows-1252', 'windows-1253', 'windows-1254',
+    'windows-1255', 'windows-1256', 'windows-1257', 'windows-1258',
+    'KOI8-R', 'KOI8-U', 'ASCII', 'ISO-2022-JP', 'ISO-2022-KR', 'ISO-2022-CN',
+    'GB18030', 'Big5', 'EUC-JP', 'Shift_JIS', 'base64'
+  ]),
   mlPayloadCount: 20,
   maxPayloadLength: 100,
   reportFile: 'xss_fuzzer_report.json',
-  maxWorkersPayloads: 10,
+  maxWorkers: 4,
   batchSize: 100
 };
+
+function safelyAccessLength(obj) {
+  return obj && Array.isArray(obj) ? obj.length : 0;
+}
+
+function getSupportedEncodings(encodings) {
+  return encodings.filter(encoding => {
+    if (encoding === 'ISO-2022-JP' || encoding === 'base64') {
+      return true;
+    }
+    try {
+      Iconv.encode('test', encoding);
+      return true;
+    } catch (error) {
+      console.warn(`Encoding not supported and will be skipped: ${encoding}`);
+      return false;
+    }
+  });
+}
 
 class MarkovChain {
   constructor() {
@@ -71,13 +92,171 @@ class MarkovChain {
   }
 }
 
+class EnhancedMarkovChain {
+  constructor() {
+    this.unigramChain = new Map();
+    this.bigramChain = new Map();
+    this.trigramChain = new Map();
+  }
+
+  addSequence(sequence) {
+    if (typeof sequence !== 'string' || sequence.length === 0) {
+      console.warn("Invalid sequence provided to addSequence");
+      return;
+    }
+
+    for (let i = 0; i < sequence.length; i++) {
+      // Unigram
+      const char = sequence[i];
+      this.unigramChain.set(char, (this.unigramChain.get(char) || 0) + 1);
+
+      // Bigram
+      if (i < sequence.length - 1) {
+        const bigram = sequence.slice(i, i + 2);
+        if (!this.bigramChain.has(bigram)) {
+          this.bigramChain.set(bigram, new Map());
+        }
+        const nextChar = sequence[i + 2] || null;
+        const nextMap = this.bigramChain.get(bigram);
+        nextMap.set(nextChar, (nextMap.get(nextChar) || 0) + 1);
+      }
+
+      // Trigram
+      if (i < sequence.length - 2) {
+        const trigram = sequence.slice(i, i + 3);
+        if (!this.trigramChain.has(trigram)) {
+          this.trigramChain.set(trigram, new Map());
+        }
+        const nextChar = sequence[i + 3] || null;
+        const nextMap = this.trigramChain.get(trigram);
+        nextMap.set(nextChar, (nextMap.get(nextChar) || 0) + 1);
+      }
+    }
+  }
+
+  generate(length) {
+    if (this.trigramChain.size === 0) {
+      console.warn("Markov chain is empty. Unable to generate sequence.");
+      return '';
+    }
+
+    let result = this.getRandomStart();
+    while (result.length < length) {
+      const next = this.getNextChar(result);
+      if (next === null) break;
+      result += next;
+    }
+    return result;
+  }
+
+  getRandomStart() {
+    const starts = Array.from(this.trigramChain.keys());
+    return starts[Math.floor(Math.random() * starts.length)];
+  }
+
+  getNextChar(sequence) {
+    if (sequence.length >= 3) {
+      const trigram = sequence.slice(-3);
+      if (this.trigramChain.has(trigram)) {
+        return this.weightedRandomChoice(this.trigramChain.get(trigram));
+      }
+    }
+
+    if (sequence.length >= 2) {
+      const bigram = sequence.slice(-2);
+      if (this.bigramChain.has(bigram)) {
+        return this.weightedRandomChoice(this.bigramChain.get(bigram));
+      }
+    }
+
+    return this.weightedRandomChoice(this.unigramChain);
+  }
+
+  weightedRandomChoice(weightMap) {
+    if (!weightMap || weightMap.size === 0) return null;
+
+    const total = Array.from(weightMap.values()).reduce((sum, weight) => sum + weight, 0);
+    let random = Math.random() * total;
+    for (const [item, weight] of weightMap.entries()) {
+      random -= weight;
+      if (random <= 0) return item;
+    }
+    return null;
+  }
+}
+
+class GeneticAlgorithm {
+  constructor() {
+    this.population = [];
+    this.mutationRate = 0.1;
+  }
+
+  addToPopulation(payload) {
+    if (payload && typeof payload === 'string' && !this.population.includes(payload)) {
+      this.population.push(payload);
+    }
+  }
+
+  mutate(payload) {
+    if (!payload || typeof payload !== 'string') return '';
+    return payload.split('').map(char =>
+      Math.random() < this.mutationRate ? String.fromCharCode(char.charCodeAt(0) ^ 1) : char
+    ).join('');
+  }
+
+  crossover(parent1, parent2) {
+    if (!parent1 || !parent2 || typeof parent1 !== 'string' || typeof parent2 !== 'string') {
+      return '';
+    }
+    const crossoverPoint = Math.floor(Math.random() * Math.min(parent1.length, parent2.length));
+    return parent1.slice(0, crossoverPoint) + parent2.slice(crossoverPoint);
+  }
+
+  evolvePayloads(successfulPatterns, count) {
+    // Add successful patterns to the population
+    successfulPatterns.forEach(pattern => this.addToPopulation(pattern));
+
+    // If population is empty or has only one element, return empty array
+    if (this.population.length <= 1) {
+      console.warn("Insufficient population for evolution. Returning empty array.");
+      return [];
+    }
+
+    let evolved = [];
+    for (let i = 0; i < count; i++) {
+      const parent1 = this.population[Math.floor(Math.random() * this.population.length)];
+      const parent2 = this.population[Math.floor(Math.random() * this.population.length)];
+      let child = this.crossover(parent1, parent2);
+      child = this.mutate(child);
+      if (child) {
+        evolved.push(child);
+      }
+    }
+    return evolved;
+  }
+}
+
 class PayloadGenerator {
   constructor() {
     this.successfulPatterns = new Set();
     this.memoizedPayloads = new Map();
     this.browserSpecificPayloads = this.generateBrowserSpecificPayloads();
     this.markovChain = new MarkovChain();
+    this.enhancedMarkovChain = new EnhancedMarkovChain();
     this.uniquePayloads = new Set();
+    this.geneticAlgorithm = new GeneticAlgorithm();
+
+    // Initialize with seed data
+    this.initializeSeedData();
+  }
+
+  initializeSeedData() {
+    const seedPayloads = this.generateBasePayloads();
+    seedPayloads.forEach(payload => {
+      this.markovChain.addSequence(payload);
+      this.enhancedMarkovChain.addSequence(payload);
+      this.geneticAlgorithm.addToPopulation(payload);
+    });
   }
 
   generateBasePayloads() {
@@ -140,11 +319,17 @@ class PayloadGenerator {
   generateMLPayloads(count = config.mlPayloadCount, maxLength = config.maxPayloadLength) {
     const payloads = [];
     for (let i = 0; i < count; i++) {
-      let payload = this.markovChain.generate(maxLength);
-      if (!payload.includes('<') || !payload.includes('>')) {
-        payload = `<${payload}>`;
-      }
-      if (this.isUniquePayload(payload)) {
+      let payload = this.enhancedMarkovChain.generate(maxLength);
+      if (payload && payload.length > 0) {
+        if (!payload.includes('<') || !payload.includes('>')) {
+          payload = `<${payload}>`;
+        }
+        if (this.isUniquePayload(payload)) {
+          payloads.push(payload);
+        }
+      } else {
+        console.warn("Generated an empty payload, using a base payload instead.");
+        payload = this.generateBasePayloads()[Math.floor(Math.random() * this.generateBasePayloads().length)];
         payloads.push(payload);
       }
     }
@@ -165,8 +350,9 @@ class PayloadGenerator {
     const domBasedPayloads = this.generateDOMBasedPayloads();
     const browserPayloads = Object.values(this.browserSpecificPayloads).flat();
     const mlPayloads = this.generateMLPayloads();
+    const geneticPayloads = this.geneticAlgorithm.evolvePayloads(this.successfulPatterns, 20);
 
-    const allPayloads = [...basePayloads, ...domBasedPayloads, ...browserPayloads, ...mlPayloads];
+    const allPayloads = [...basePayloads, ...domBasedPayloads, ...browserPayloads, ...mlPayloads, ...geneticPayloads];
 
     for (const payload of allPayloads) {
       if (this.isUniquePayload(payload)) {
@@ -195,7 +381,9 @@ class PayloadGenerator {
       p => p.replace('>', ' id=x>'),
       p => p.replace('script', 'scrscriptipt'),
       p => p.replace('on', 'oonn'),
-      p => p.split('').reverse().join('')
+      p => p.split('').reverse().join(''),
+      p => this.markovChain.generate(p.length),
+      p => this.geneticAlgorithm.mutate(p),
     ];
     return mutations[Math.floor(Math.random() * mutations.length)](pattern);
   }
@@ -203,33 +391,60 @@ class PayloadGenerator {
   addSuccessfulPattern(payload) {
     this.successfulPatterns.add(payload);
     this.markovChain.addSequence(payload);
+    this.enhancedMarkovChain.addSequence(payload);
+    this.geneticAlgorithm.addToPopulation(payload);
   }
 }
 
-const mutationFunctions = [
-  p => p.toUpperCase(),
-  p => p.toLowerCase(),
-  p => p.split('').map(c => Math.random() > 0.5 ? c.toUpperCase() : c.toLowerCase()).join(''),
-  p => encodeURIComponent(p),
-  p => p.replace(/</g, '&lt;'),
-  p => p.replace(/>/g, '&gt;'),
-  p => p.replace(/"/g, '&quot;'),
-  p => p.replace(/'/g, '&#x27;'),
-  p => p.replace(/&/g, '&amp;'),
-  p => p.replace(/\//g, '&#x2F;'),
-  p => p.includes('<script') ? p.replace('script', 'scr\\ipt') : p,
-  p => p.includes('javascript:') ? p.replace('javascript:', 'java\\script:') : p,
-  p => p.includes('=') ? p.replace('=', '&#x3D;') : p,
-  p => p.includes('=') ? p.replace('=', '=\'') : p,
-  p => p.includes('http') ? p.replace('http', 'ht\\tp') : p,
-  p => p.includes('style') ? p.replace('style', 'st\\yle') : p,
-  p => p.replace(/[aeiou]/g, char => `&#x${char.charCodeAt(0).toString(16)};`),
-  p => p.replace(/\s/g, '/**/')
-];
+const contextAwareMutate = (payload, context = 'html') => {
+  const contextMutations = {
+    'html': [
+      p => p.replace(/</g, '&lt;'),
+      p => p.replace(/>/g, '&gt;'),
+      p => p.replace(/"/g, '&quot;'),
+      p => p.replace(/'/g, '&#39;'),
+      p => `<!--${p}-->`,
+      p => `<![CDATA[${p}]]>`,
+    ],
+    'attribute': [
+      p => p.replace(/"/g, '&quot;'),
+      p => p.replace(/'/g, '&#39;'),
+      p => encodeURIComponent(p),
+      p => p.replace(/\s/g, '&#x20;'),
+      p => p.split('').map(c => `&#x${c.charCodeAt(0).toString(16)};`).join(''),
+    ],
+    'js': [
+      p => p.replace(/'/g, '\\\''),
+      p => p.replace(/"/g, '\\"'),
+      p => `eval(atob('${btoa(p)}'))`,
+      p => `String.fromCharCode(${p.split('').map(c => c.charCodeAt(0)).join(',')})`,
+      p => `[${p.split('').map(c => `'${c}'`).join(',')}].join('')`,
+    ],
+    'url': [
+      p => encodeURIComponent(p),
+      p => p.split('').map(c => `%${c.charCodeAt(0).toString(16)}`).join(''),
+      p => btoa(p),
+      p => p.replace(/\s/g, '+'),
+    ],
+    'css': [
+      p => p.replace(/'/g, '\\"'),
+      p => p.split('').map(c => `\\${c.charCodeAt(0).toString(16)} `).join(''),
+      p => `eval(atob('${btoa(p)}'))`,
+    ],
+  };
 
-function contextAwareMutate(payload) {
-  return mutationFunctions.map(mutate => mutate(payload));
-}
+  const generalMutations = [
+    p => p.toUpperCase(),
+    p => p.toLowerCase(),
+    p => p.split('').map(c => Math.random() > 0.5 ? c.toUpperCase() : c.toLowerCase()).join(''),
+    p => p.split('').reverse().join(''),
+    p => p.replace(/\s/g, String.fromCharCode(0)),
+    p => p.replace(/[aeiou]/g, char => `&#x${char.charCodeAt(0).toString(16)};`),
+  ];
+
+  const mutations = [...generalMutations, ...(contextMutations[context] || [])];
+  return mutations.map(mutate => mutate(payload));
+};
 
 const memoizedInsertions = new Map();
 
@@ -275,10 +490,10 @@ function categorizeBypass(original, cleaned) {
   return 'Unknown';
 }
 
-// Basic ISO-2022-JP encoding function
 function basicISO2022JPEncode(str) {
   const ascii = Buffer.from('\x1B(B').toString('binary');
   const jis = Buffer.from('\x1B$B').toString('binary');
+  const escapeSequence = Buffer.from('\xb1(J').toString('binary');
   let result = ascii;
   for (let i = 0; i < str.length; i++) {
     const charCode = str.charCodeAt(i);
@@ -287,6 +502,10 @@ function basicISO2022JPEncode(str) {
     } else {
       result += str[i];
     }
+    // Randomly insert the escape sequence
+    if (Math.random() < 0.1) {  // 10% chance to insert the escape sequence
+      result += escapeSequence;
+    }
   }
   return result;
 }
@@ -294,36 +513,85 @@ function basicISO2022JPEncode(str) {
 function encodeWithFallback(payload, encoding) {
   if (encoding === 'ISO-2022-JP') {
     return basicISO2022JPEncode(payload);
+  } else if (encoding === 'base64') {
+    return Buffer.from(payload).toString('base64');
+  } else if (encoding === 'ISO-2022-JP-ESCAPED') {
+    // This is a new encoding option that always includes the escape sequence
+    return basicISO2022JPEncode(payload) + Buffer.from('\xb1(J').toString('binary');
   } else {
     return Iconv.encode(Iconv.decode(Buffer.from(payload), 'utf8'), encoding).toString('binary');
   }
 }
 
-function* fuzzEncodings(payload, escapeSequence) {
+config.encodings.push('ISO-2022-JP-ESCAPED');
+
+const dangerousEscapeSequences = [
+  '\xb1(J',  // ISO-2022-JP escape
+  '\x1B',    // ASCII escape
+  '\u001B',  // Unicode escape
+  '\e',      // Another representation of escape
+  '\\',      // Backslash (for escaping in various contexts)
+  '%',       // URL encoding escape
+  '&',       // HTML entity escape
+  '&#',      // HTML decimal escape
+  '&#x',     // HTML hexadecimal escape
+];
+
+function fuzzyEncode(payload, encoding) {
+  let encodedPayload = encodeWithFallback(payload, encoding);
+
+  // Randomly insert dangerous escape sequences
+  dangerousEscapeSequences.forEach(seq => {
+    if (Math.random() < 0.1) {  // 10% chance to insert each sequence
+      const insertPosition = Math.floor(Math.random() * encodedPayload.length);
+      encodedPayload = encodedPayload.slice(0, insertPosition) + seq + encodedPayload.slice(insertPosition);
+    }
+  });
+
+  return encodedPayload;
+}
+
+function* fuzzEncodings(payload) {
   if (!/[<>'"&]/.test(payload)) {
     return;
   }
 
   for (const encoding of config.encodings) {
     try {
-      if (encoding !== 'ISO-2022-JP' && !Iconv.encodingExists(encoding)) {
+      if (encoding !== 'ISO-2022-JP' && encoding !== 'base64' && !Iconv.encodingExists(encoding)) {
         console.warn(`Encoding not supported: ${encoding}`);
         continue;
       }
 
-      const encodedPayload = encodeWithFallback(payload, encoding);
+      const encodedPayload = fuzzyEncode(payload, encoding);
       const cleanedPayload = testDOMPurify(encodedPayload);
-      
+
       if (cleanedPayload !== encodedPayload) {
-        const cleanedAllowedScripts = testDOMPurify(encodedPayload, {ALLOW_SCRIPT: true});
+        const cleanedAllowedScripts = testDOMPurify(encodedPayload, { ALLOW_SCRIPT: true });
         yield {
           encoding,
-          escapeSequence,
           original: payload,
           encoded: encodedPayload,
           cleanedDefault: cleanedPayload,
           cleanedAllowScript: cleanedAllowedScripts,
           category: categorizeBypass(encodedPayload, cleanedPayload)
+        };
+      }
+
+      // Additional test with concatenated escape sequences
+      const concatenatedEscapes = dangerousEscapeSequences.join('');
+      const encodedPayloadWithEscapes = fuzzyEncode(payload + concatenatedEscapes, encoding);
+      const cleanedPayloadWithEscapes = testDOMPurify(encodedPayloadWithEscapes);
+
+      if (cleanedPayloadWithEscapes !== encodedPayloadWithEscapes) {
+        const cleanedAllowedScriptsWithEscapes = testDOMPurify(encodedPayloadWithEscapes, { ALLOW_SCRIPT: true });
+        yield {
+          encoding,
+          original: payload + concatenatedEscapes,
+          encoded: encodedPayloadWithEscapes,
+          cleanedDefault: cleanedPayloadWithEscapes,
+          cleanedAllowScript: cleanedAllowedScriptsWithEscapes,
+          category: categorizeBypass(encodedPayloadWithEscapes, cleanedPayloadWithEscapes)
         };
       }
     } catch (error) {
@@ -334,124 +602,266 @@ function* fuzzEncodings(payload, escapeSequence) {
 
 const escapeSequences = Array.from({ length: 256 }, (_, i) => `\\x${i.toString(16).padStart(2, '0')}`);
 
-if (isMainThread) {
-  console.log("Starting XSS fuzzer...");
-  const payloadGenerator = new PayloadGenerator();
-  const numCPUs = Math.min(os.cpus().length, Math.ceil(config.maxPayloads / config.maxWorkersPayloads));
-
-  console.log(`Generating payloads... (max: ${config.maxPayloads})`);
-  const payloadIterator = payloadGenerator.generateDynamicPayloads();
-  const workerPayloads = Array(numCPUs).fill().map(() => []);
-
-  let totalPayloads = 0;
-  for (let i = 0; i < config.maxPayloads && totalPayloads < numCPUs * config.maxWorkersPayloads; i++) {
-    const { value: payload, done } = payloadIterator.next();
-    if (done) break;
-    workerPayloads[i % numCPUs].push(payload);
-    totalPayloads++;
+class AsyncQueue {
+  constructor() {
+    this.queue = [];
+    this.waitingResolvers = [];
   }
 
-  console.log(`Generated ${totalPayloads} unique payloads.`);
-  console.log(`Distributing payloads across ${numCPUs} worker threads...`);
-
-  let results = [];
-  let completedWorkers = 0;
-
-  for (let i = 0; i < numCPUs; i++) {
-    const worker = new Worker(__filename, {
-      workerData: {
-        payloads: workerPayloads[i],
-        escapeSequences
-      }
-    });
-
-    worker.on('message', (workerResults) => {
-      results = results.concat(workerResults);
-      console.log(`Received ${workerResults.length} results from worker ${i + 1}. Total results: ${results.length}`);
-    });
-
-    worker.on('error', (error) => {
-      console.error(`Worker ${i + 1} error:`, error);
-    });
-
-    worker.on('exit', (code) => {
-      completedWorkers++;
-      console.log(`Worker ${i + 1} completed with exit code ${code}. (${completedWorkers}/${numCPUs})`);
-
-      if (completedWorkers === numCPUs) {
-        console.log("\nAll workers completed. Processing results...");
-        processResults(results, payloadGenerator);
-      }
-    });
-  }
-} else {
-  const { payloads, escapeSequences } = workerData;
-  let workerResults = [];
-
-  console.log(`Worker started, processing ${payloads.length} payloads...`);
-
-  for (const [index, payload] of payloads.entries()) {
-    console.log(`Processing payload ${index + 1}/${payloads.length}`);
-    const mutatedPayloads = contextAwareMutate(payload);
-    mutatedPayloads.push(payload);  // Include the original payload
-
-    for (const mutatedPayload of mutatedPayloads) {
-      for (const escapeSequence of escapeSequences) {
-        const variantPayloads = insertEscapeSequence(mutatedPayload, escapeSequence);
-        for (const variantPayload of variantPayloads) {
-          for (const result of fuzzEncodings(variantPayload, escapeSequence)) {
-            workerResults.push(result);
-            if (workerResults.length >= config.batchSize) {
-              parentPort.postMessage(workerResults);
-              workerResults = [];
-            }
-          }
-        }
-      }
+  push(item) {
+    if (this.waitingResolvers.length > 0) {
+      const resolve = this.waitingResolvers.shift();
+      resolve(item);
+    } else {
+      this.queue.push(item);
     }
   }
 
-  if (workerResults.length > 0) {
-    parentPort.postMessage(workerResults);
+  async pop() {
+    if (this.queue.length > 0) {
+      return this.queue.shift();
+    } else {
+      return new Promise(resolve => {
+        this.waitingResolvers.push(resolve);
+      });
+    }
   }
-
-  console.log(`Worker completed processing ${payloads.length} payloads.`);
 }
 
 function processResults(results, payloadGenerator) {
   console.log(`Processing ${results.length} total results...`);
 
-  console.log("\nFuzzing complete. Summary of results:");
-  console.log(`Total potential bypasses found: ${results.length}`);
+  if (!Array.isArray(results) || results.length === 0) {
+    console.log("No results to process.");
+    return;
+  }
 
   const byCategory = results.reduce((acc, result) => {
     acc[result.category] = (acc[result.category] || 0) + 1;
     return acc;
   }, {});
 
-  console.log("\nBypasses by category:");
-  Object.entries(byCategory).forEach(([category, count]) => {
-    console.log(`${category}: ${count}`);
-  });
-
-  const topEncodings = results.reduce((acc, result) => {
+  const byEncoding = results.reduce((acc, result) => {
     acc[result.encoding] = (acc[result.encoding] || 0) + 1;
     return acc;
   }, {});
 
+  console.log("\nFuzzing complete. Summary of results:");
+  console.log(`Total potential bypasses found: ${results.length}`);
+
+  console.log("\nBypasses by category:");
+  Object.entries(byCategory)
+    .sort((a, b) => b[1] - a[1])
+    .forEach(([category, count]) => {
+      console.log(`${category}: ${count}`);
+    });
+
   console.log("\nTop encodings with potential bypasses:");
-  Object.entries(topEncodings)
+  Object.entries(byEncoding)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
     .forEach(([encoding, count]) => {
       console.log(`${encoding}: ${count}`);
     });
 
+  // Add successful patterns to the payload generator for future use
   results.forEach(result => {
     payloadGenerator.addSuccessfulPattern(result.original);
   });
 
   // Write full report to file
-  fs.writeFileSync(config.reportFile, JSON.stringify(results, null, 2));
+  const reportData = {
+    summary: {
+      totalBypasses: results.length,
+      byCategory,
+      topEncodings: Object.fromEntries(Object.entries(byEncoding).sort((a, b) => b[1] - a[1]).slice(0, 5)),
+    },
+    detailedResults: results,
+  };
+
+  fs.writeFileSync(config.reportFile, JSON.stringify(reportData, null, 2));
   console.log(`\nFull report written to ${config.reportFile}`);
 }
+
+function loadConfig(configPath) {
+  try {
+    const userConfig = require(configPath);
+    return { ...config, ...userConfig };
+  } catch (error) {
+    console.warn(`Failed to load config from ${configPath}. Using default config.`);
+    return config;
+  }
+}
+
+async function runFuzzer(configPath) {
+  console.log("Starting runFuzzer function...");
+  const runConfig = loadConfig(configPath);
+  console.log("Starting XSS fuzzer with the following configuration:");
+  console.log(JSON.stringify(runConfig, null, 2));
+
+  const numCPUs = Math.min(os.cpus().length, runConfig.maxWorkers);
+  const payloadGenerator = new PayloadGenerator();
+  const workQueue = new AsyncQueue();
+  let results = [];
+  let activeWorkers = 0;
+
+  console.log(`Starting fuzzer with ${numCPUs} worker threads...`);
+
+  // Populate work queue
+  console.log("Generating payloads...");
+  let payloadCount = 0;
+  for (const payload of payloadGenerator.generateDynamicPayloads()) {
+    if (payload) {
+      workQueue.push(payload);
+      payloadCount++;
+      if (payloadCount % 100 === 0) {
+        console.log(`Generated ${payloadCount} payloads so far...`);
+      }
+    }
+  }
+  console.log(`Total payloads generated: ${payloadCount}`);
+
+  const resultsStream = fs.createWriteStream(config.reportFile, { flags: 'a' });
+
+  function createWorker() {
+    console.log("Creating new worker...");
+    const worker = new Worker(__filename, {
+      workerData: { config: runConfig }
+    });
+    activeWorkers++;
+    console.log(`Active workers: ${activeWorkers}`);
+
+    worker.on('message', (message) => {
+      if (message && message.type === 'result' && Array.isArray(message.data)) {
+        message.data.forEach(result => {
+          resultsStream.write(JSON.stringify(result) + '\n');
+        });
+        console.log(`Processed ${message.data.length} results.`);
+      } else if (message && message.type === 'ready') {
+        console.log("Worker ready, sending next payload...");
+        workQueue.pop().then(payload => {
+          if (payload) {
+            worker.postMessage({ type: 'payload', data: payload });
+          } else {
+            console.log("No more payloads, terminating worker...");
+            worker.terminate();
+          }
+        });
+      }
+    });
+
+    worker.on('error', (error) => {
+      console.error(`Worker error: ${error.message}`);
+    });
+
+    worker.on('exit', async (code) => {
+      activeWorkers--;
+      console.log(`Worker exited with code ${code}. Active workers: ${activeWorkers}`);
+      if (code !== 0) {
+        console.error(`Worker stopped with exit code ${code}`);
+      }
+      if (activeWorkers === 0) {
+        resultsStream.end();
+        console.log('All workers completed. Processing final results...');
+        await processFinalResults(config.reportFile);
+      }
+    });
+
+    return worker;
+  }
+
+  async function processFinalResults(filePath) {
+    const fileStream = fs.createReadStream(filePath);
+    const rl = readline.createInterface({
+      input: fileStream,
+      crlfDelay: Infinity
+    });
+
+    const results = [];
+    for await (const line of rl) {
+      results.push(JSON.parse(line));
+    }
+
+    processResults(results);
+  }
+
+  // Create initial set of workers
+  console.log("Creating initial set of workers...");
+  for (let i = 0; i < numCPUs; i++) {
+    createWorker();
+  }
+  console.log("Initial workers created, waiting for completion...");
+}
+
+if (!isMainThread) {
+  console.log("Worker thread starting...");
+  const { config: workerConfig } = workerData || {};
+
+  function processPayload(payload) {
+    if (!payload) {
+      console.log("Received empty payload, skipping...");
+      return;
+    }
+    console.log(`Processing payload: ${payload.substring(0, 50)}...`);
+    const results = [];
+    for (const context of ['html', 'attribute', 'js', 'url', 'css']) {
+      console.log(`Mutating payload for context: ${context}`);
+      const mutatedPayloads = contextAwareMutate(payload, context);
+      for (const mutatedPayload of mutatedPayloads) {
+        if (mutatedPayload) {
+          console.log(`Fuzzing encodings for mutated payload: ${mutatedPayload.substring(0, 50)}...`);
+          for (const result of fuzzEncodings(mutatedPayload)) {
+            if (result) {
+              results.push(result);
+              if (safelyAccessLength(results) >= workerConfig.batchSize) {
+                console.log(`Sending batch of ${results.length} results`);
+                parentPort.postMessage({ type: 'result', data: results });
+                results.length = 0;  // Clear the results array
+              }
+            }
+          }
+        }
+      }
+    }
+    if (safelyAccessLength(results) > 0) {
+      console.log(`Sending final batch of ${results.length} results`);
+      parentPort.postMessage({ type: 'result', data: results });
+    }
+  }
+
+  parentPort.on('message', (message) => {
+    if (message && message.type === 'payload' && message.data) {
+      console.log("Received payload from main thread, processing...");
+      processPayload(message.data);
+      console.log("Payload processed, sending ready message...");
+      parentPort.postMessage({ type: 'ready' });
+    }
+  });
+
+  console.log("Worker initialized, sending ready message...");
+  parentPort.postMessage({ type: 'ready' });
+}
+
+// Add these lines at the end of your file
+if (require.main === module) {
+  console.log("Script running as main module");
+  const configPath = process.argv[2] || './fuzzer-config.json';
+  console.log(`Using config path: ${configPath}`);
+  runFuzzer(configPath).catch(error => {
+    console.error(`Fuzzer execution failed: ${error.message}`);
+    console.error(error.stack);
+    process.exit(1);
+  });
+} else {
+  console.log("Script loaded as a module");
+}
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+module.exports = { runFuzzer, PayloadGenerator, processResults };

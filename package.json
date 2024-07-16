@@ -11,6 +11,8 @@
   "dependencies": {
     "dompurify": "^3.1.6",
     "iconv-lite": "^0.6.3",
-    "jsdom": "^24.1.0"
+    "jsdom": "^24.1.0",
+    "puppeteer": "^22.13.0",
+    "winston": "^3.13.1"
   }
 }

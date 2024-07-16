@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XSS Fuzzer Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; line-height: 1.6; }
+        h1, h2, h3 { color: #333; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        .summary { margin-bottom: 30px; background-color: #f0f0f0; padding: 20px; border-radius: 5px; }
+        .error-message { color: #ff0000; font-weight: bold; }
+        #versionSelector { margin-bottom: 20px; }
+        select, button { padding: 8px; font-size: 16px; }
+        button { cursor: pointer; background-color: #4CAF50; color: white; border: none; border-radius: 4px; }
+        button:hover { background-color: #45a049; }
+        .poc-frame { width: 300px; height: 50px; border: 1px solid #ccc; }
+        .payload { font-family: monospace; word-break: break-all; }
+        .test-button-container { text-align: right; margin-bottom: 20px; }
+        .icon { font-size: 18px; vertical-align: middle; }
+        .success { color: green; font-weight: bold; }
+        .failure { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>XSS Fuzzer Report</h1>
+    <div id="versionSelector">
+        <label for="dompurifyVersion">Select DOMPurify version:</label>
+        <select id="dompurifyVersion"></select>
+        <button onclick="loadSelectedVersion()">Load Version</button>
+    </div>
+    <input type="file" id="fileInput" accept=".json">
+    <button onclick="loadFile()">Load JSON</button>
+    <div class="test-button-container">
+        <button onclick="testAllPayloads()">TEST All</button>
+    </div>
+    <div id="content">
+        <p>Select a file to display data...</p>
+    </div>
+
+    <script>
+        let dompurifyVersions = [];
+        let latestVersion = '';
+        let reportData = null;
+
+        function escapeHtml(unsafe) {
+            return unsafe
+                 .replace(/&/g, "&amp;")
+                 .replace(/</g, "&lt;")
+                 .replace(/>/g, "&gt;")
+                 .replace(/"/g, "&quot;")
+                 .replace(/'/g, "&#039;");
+        }
+
+        function createPoCFrame(payload, id, index) {
+            const frameId = `poc-${index}`;
+            return `
+                <iframe id="${frameId}" class="poc-frame" sandbox="allow-scripts"></iframe>
+                <span id="result-${frameId}" class="icon"></span>
+                <button onclick="testSinglePayload('${escapeHtml(payload)}', '${id}', '${frameId}')">TEST</button>
+            `;
+        }
+
+        function testSinglePayload(payload, id, frameId) {
+            const frame = document.getElementById(frameId);
+            frame.srcdoc = `
+                <script>
+                    window.FUZZED_${id} = false;
+                    ${DOMPurify.sanitize(payload)}
+                    if (window.FUZZED_${id}) {
+                        document.body.innerHTML = 'XSS Successful';
+                    } else {
+                        document.body.innerHTML = 'XSS Failed';
+                    }
+                <\/script>
+            `;
+
+            frame.onload = function() {
+                const resultIcon = document.getElementById(`result-${frameId}`);
+                if (frame.contentDocument.body.innerHTML.includes('XSS Successful')) {
+                    console.log(`XSS payload executed in iframe: ${payload}`);
+                    resultIcon.innerHTML = '✅ Bypass';
+                    resultIcon.className = 'success';
+                } else {
+                    console.log(`XSS payload not executed in iframe: ${payload}`);
+                    resultIcon.innerHTML = '❌ Blocked';
+                    resultIcon.className = 'failure';
+                }
+            };
+        }
+
+        function testAllPayloads() {
+            reportData.results.forEach((result, index) => {
+                testSinglePayload(result.encoded, result.id, `poc-${index}`);
+            });
+        }
+
+        function displayResults(data) {
+            const contentDiv = document.getElementById('content');
+            const summary = data.summary;
+
+            let summaryHtml = `
+                <div class="summary">
+                    <h2>Summary</h2>
+                    <p>Total potential bypasses found: ${summary.totalBypasses}</p>
+                    <h3>Bypasses by category:</h3>
+                    <ul>
+                        ${Object.entries(summary.byCategory).map(([category, count]) => `<li>${category}: ${count}</li>`).join('')}
+                    </ul>
+                    <h3>Top encodings with potential bypasses:</h3>
+                    <ul>
+                        ${Object.entries(summary.byEncoding)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 5)
+                            .map(([encoding, count]) => `<li>${encoding}: ${count}</li>`)
+                            .join('')}
+                    </ul>
+                </div>
+            `;
+
+            let tableHtml = `
+                <table id="results">
+                    <thead>
+                        <tr>
+                            <th>Original Payload</th>
+                            <th>Encoding</th>
+                            <th>Encoded Payload</th>
+                            <th>Category</th>
+                            <th>DOMPurify Output</th>
+                            <th>PoC</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.results.map((result, index) => `
+                            <tr>
+                                <td class="payload">${escapeHtml(result.original)}</td>
+                                <td>${result.encoding}</td>
+                                <td class="payload">${escapeHtml(result.encoded)}</td>
+                                <td>${result.category}</td>
+                                <td class="payload">${escapeHtml(result.cleanedDefault)}</td>
+                                <td>${createPoCFrame(result.encoded, result.id, index)}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+
+            contentDiv.innerHTML = summaryHtml + tableHtml;
+        }
+
+        function displayError(message) {
+            const contentDiv = document.getElementById('content');
+            contentDiv.innerHTML = `<p class="error-message">${message}</p>`;
+        }
+
+        function loadDOMPurifyVersions() {
+            fetch('https://api.cdnjs.com/libraries/dompurify?fields=latest,versions')
+                .then(response => response.json())
+                .then(data => {
+                    dompurifyVersions = data.versions;
+                    latestVersion = data.latest;
+                    const select = document.getElementById('dompurifyVersion');
+                    select.innerHTML = `<option value="${latestVersion}">Latest (${latestVersion.split('/').pop().replace('purify.min.js', '')})</option>`;
+                    dompurifyVersions.forEach(version => {
+                        select.innerHTML += `<option value="https://cdnjs.cloudflare.com/ajax/libs/dompurify/${version}/purify.min.js">${version}</option>`;
+                    });
+                    loadSelectedVersion();
+                })
+                .catch(error => {
+                    console.error('Error loading DOMPurify versions:', error);
+                    displayError('Failed to load DOMPurify versions. Please try again later.');
+                });
+        }
+
+        function loadSelectedVersion() {
+            const select = document.getElementById('dompurifyVersion');
+            const selectedVersion = select.value;
+
+            // Remove any existing DOMPurify script
+            const existingScript = document.getElementById('dompurifyScript');
+            if (existingScript) {
+                existingScript.remove();
+            }
+
+            // Load the selected DOMPurify version
+            const script = document.createElement('script');
+            script.id = 'dompurifyScript';
+            script.src = selectedVersion;
+            script.onload = () => {
+                if (reportData) {
+                    displayResults(reportData);
+                }
+            };
+            script.onerror = () => displayError('Failed to load DOMPurify. Please try another version.');
+            document.head.appendChild(script);
+        }
+
+        function loadFile() {
+            const fileInput = document.getElementById('fileInput');
+            if (fileInput.files.length === 0) {
+                alert('Please select a file.');
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+
+            reader.onload = function(event) {
+                try {
+                    const jsonData = JSON.parse(event.target.result);
+                    reportData = jsonData;
+                    displayResults(jsonData);
+                } catch (e) {
+                    console.error('Error parsing JSON!', e);
+                    document.getElementById('content').innerHTML = `<p class="error-message">Error parsing JSON: ${e.message}</p>`;
+                }
+            };
+
+            reader.onerror = function() {
+                console.error('Error reading file!');
+                document.getElementById('content').innerHTML = `<p class="error-message">Failed to read file</p>`;
+            };
+
+            reader.readAsText(file);
+        }
+
+        // Initialize by loading DOMPurify versions
+        loadDOMPurifyVersions();
+    </script>
+</body>
+</html>
