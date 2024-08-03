@@ -2,6 +2,7 @@ const tf = require('@tensorflow/tfjs-node-gpu');
 const fs = require('fs');
 const fsp = require('fs').promises;
 const csv = require('csv-parser');
+const readline = require('readline');
 const { Tokenizer } = require('./tokenizer');
 
 async function readCSV(filePath) {
@@ -28,12 +29,12 @@ function shuffleArray(array) {
 
 function createModel(maxLength, vocabSize) {
   const model = tf.sequential();
-  model.add(tf.layers.embedding({inputDim: vocabSize, outputDim: 64, inputLength: maxLength}));
-  model.add(tf.layers.spatialDropout1d({rate: 0.3}));
+  model.add(tf.layers.embedding({ inputDim: vocabSize, outputDim: 64, inputLength: maxLength }));
+  model.add(tf.layers.spatialDropout1d({ rate: 0.3 }));
   model.add(tf.layers.globalAveragePooling1d());
-  model.add(tf.layers.dense({units: 32, activation: 'relu', kernelRegularizer: tf.regularizers.l2({l2: 1e-4})}));
-  model.add(tf.layers.dropout({rate: 0.5}));
-  model.add(tf.layers.dense({units: 1, activation: 'sigmoid', kernelRegularizer: tf.regularizers.l2({l2: 1e-4})}));
+  model.add(tf.layers.dense({ units: 32, activation: 'relu', kernelRegularizer: tf.regularizers.l2({ l2: 1e-4 }) }));
+  model.add(tf.layers.dropout({ rate: 0.5 }));
+  model.add(tf.layers.dense({ units: 1, activation: 'sigmoid', kernelRegularizer: tf.regularizers.l2({ l2: 1e-4 }) }));
 
   return model;
 }
@@ -46,6 +47,88 @@ function dataAugmentation(sentence) {
     augmentedWords.splice(indexToDuplicate, 0, augmentedWords[indexToDuplicate]);
   }
   return augmentedWords.join(' ');
+}
+
+class CustomCallback extends tf.Callback {
+  constructor(validationData, totalEpochs, totalBatches, earlyStoppingPatience = 10) {
+    super();
+    this.validationData = validationData;
+    this.totalEpochs = totalEpochs;
+    this.totalBatches = totalBatches;
+    this.bestValLoss = Infinity;
+    this.patience = earlyStoppingPatience;
+    this.wait = 0;
+  }
+
+  async onEpochBegin(epoch) {
+    this.currentEpoch = epoch + 1;
+    this.epochStartTime = Date.now();
+    this.batchesCompleted = 0;
+    console.log(`\nEpoch ${this.currentEpoch}/${this.totalEpochs}`);
+  }
+
+  async onBatchEnd(batch, logs) {
+    this.batchesCompleted++;
+    const progress = (this.batchesCompleted / this.totalBatches) * 100;
+    const eta = ((Date.now() - this.epochStartTime) / 1000 / 60 * (this.totalBatches - this.batchesCompleted) / this.batchesCompleted).toFixed(1);
+    
+    const loss = logs.loss ? logs.loss.dataSync()[0].toFixed(4) : 'N/A';
+    const acc = logs.acc ? (logs.acc.dataSync()[0] * 100).toFixed(2) : 'N/A';
+
+    readline.cursorTo(process.stdout, 0);
+    readline.clearLine(process.stdout, 0);
+    process.stdout.write(
+      `Batch ${this.batchesCompleted}/${this.totalBatches} | ` +
+      `Loss: ${loss}, Acc: ${acc}% | ` +
+      `ETA: ${eta}m | ${progress.toFixed(1)}%`
+    );
+  }
+
+  async onEpochEnd(epoch, logs) {
+    readline.cursorTo(process.stdout, 0);
+    readline.clearLine(process.stdout, 0);
+
+    const [valX, valY] = this.validationData;
+    const valLoss = await this.model.evaluate(valX, valY, { verbose: 0 });
+    const valLossValue = valLoss[0].dataSync()[0];
+    const valAccValue = valLoss[1].dataSync()[0];
+
+    const epochEndTime = Date.now();
+    const epochTime = (epochEndTime - this.epochStartTime) / 1000;
+
+    const trainLoss = logs.loss ? logs.loss.dataSync()[0].toFixed(4) : 'N/A';
+    const trainAcc = logs.acc ? (logs.acc.dataSync()[0] * 100).toFixed(2) : 'N/A';
+
+    console.log(`\nTrain Loss: ${trainLoss}, Train Accuracy: ${trainAcc}%`);
+    console.log(`Validation Loss: ${valLossValue.toFixed(4)}, Validation Accuracy: ${(valAccValue * 100).toFixed(2)}%`);
+    console.log(`Time taken: ${epochTime.toFixed(2)} seconds`);
+
+    if (valLossValue < this.bestValLoss) {
+      this.bestValLoss = valLossValue;
+      this.wait = 0;
+      console.log('New best validation loss, saving model...');
+      await this.model.save('file://./best_model');
+    } else {
+      this.wait++;
+      if (this.wait >= this.patience) {
+        this.model.stopTraining = true;
+        console.log("Early stopping triggered");
+      }
+    }
+  }
+}
+
+function createCNNModel(maxLength, vocabSize) {
+  const model = tf.sequential();
+  model.add(tf.layers.embedding({ inputDim: vocabSize, outputDim: 64, inputLength: maxLength }));
+  model.add(tf.layers.spatialDropout1d({ rate: 0.3 }));
+  model.add(tf.layers.conv1d({ filters: 64, kernelSize: 5, activation: 'relu', kernelRegularizer: tf.regularizers.l2({ l2: 1e-4 }) }));
+  model.add(tf.layers.globalMaxPooling1d());
+  model.add(tf.layers.dense({ units: 64, activation: 'relu', kernelRegularizer: tf.regularizers.l2({ l2: 1e-4 }) }));
+  model.add(tf.layers.dropout({ rate: 0.5 }));
+  model.add(tf.layers.dense({ units: 1, activation: 'sigmoid' }));
+
+  return model;
 }
 
 async function trainModel() {
@@ -87,41 +170,41 @@ async function trainModel() {
     const valXTensor = tf.tensor2d(valX);
     const valYTensor = tf.tensor1d(valY, 'int32');
 
-    console.log('Creating and compiling model...');
-    const model = createModel(maxLength, tokenizer.getVocabSize());
-    const optimizer = tf.train.adam(0.001);
+    console.log('Creating and compiling CNN model...');
+    const vocabSize = tokenizer.getVocabSize();
+    const model = createCNNModel(maxLength, vocabSize);
+
+    const initialLearningRate = 0.001;
+    const decay = initialLearningRate / 200;
+    const optimizer = tf.train.adamax(initialLearningRate, 0.9, 0.999, 1e-7);
+
     model.compile({
       optimizer: optimizer,
       loss: 'binaryCrossentropy',
       metrics: ['accuracy']
     });
-
-    // Define callback
-    const earlyStoppingCallback = tf.callbacks.earlyStopping({
-      monitor: 'val_loss',
-      patience: 5,
-      minDelta: 0.01
-    });
-
-    console.log('Starting model training...');
+  
+    console.log('Starting CNN model training...');
+    const batchSize = 32;
+    const epochs = 100;
+    const totalBatches = Math.ceil(trainX.length / batchSize);
+  
+    const customCallback = new CustomCallback([valXTensor, valYTensor], epochs, totalBatches);
+  
     const history = await model.fit(trainXTensor, trainYTensor, {
-      batchSize: 16,
-      epochs: 30,
+      batchSize,
+      epochs,
       validationData: [valXTensor, valYTensor],
-      callbacks: [earlyStoppingCallback],
-      verbose: 1
+      callbacks: [customCallback],
+      verbose: 0
     });
 
-    console.log('Training complete. Saving model...');
+    console.log('Training complete. Saving model and tokenizer...');
     await model.save('file://./xss_model');
-
-    console.log('Saving tokenizer...');
     await fsp.writeFile('tokenizer.json', JSON.stringify(tokenizer));
 
     console.log('Evaluating model...');
-    const testXTensor = tf.tensor2d(valX);
-    const testYTensor = tf.tensor1d(valY, 'int32');
-    await evaluateModel(model, testXTensor, testYTensor);
+    await evaluateModel(model, valXTensor, valYTensor);
 
     console.log('Training history:', history.history);
 
@@ -130,8 +213,6 @@ async function trainModel() {
     trainYTensor.dispose();
     valXTensor.dispose();
     valYTensor.dispose();
-    testXTensor.dispose();
-    testYTensor.dispose();
 
   } catch (error) {
     console.error('An error occurred during the training process:', error);

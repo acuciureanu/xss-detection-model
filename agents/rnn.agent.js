@@ -20,13 +20,11 @@ class RNNAgent {
         this.model = await tf.loadLayersModel(`file://${modelPath}`);
         console.log('Loaded existing model');
       } else {
-        this.model = this.buildModel();
-        console.log('Built new model');
+        console.log('Model file not found. Please train the model first.');
+        throw new Error('Model file not found');
       }
-      
-      console.log('RNN model and tokenizer loaded successfully.');
     } catch (error) {
-      console.error('Error loading model or tokenizer:', error);
+      console.error('Error loading model:', error);
       throw error;
     }
   }
@@ -37,41 +35,11 @@ class RNNAgent {
       const tokenizerData = await fs.readFile(tokenizerPath, 'utf8');
       const tokenizerJson = JSON.parse(tokenizerData);
       this.tokenizer = tokenizerJson;
-      this.vocabSize = Object.keys(this.tokenizer.wordIndex).length + 1;
+      this.vocabSize = Object.keys(this.tokenizer.wordToIndex).length + 1;
     } catch (error) {
-      console.log('Tokenizer file not found or invalid. Creating a new one.');
-      this.tokenizer = this.createBasicTokenizer();
-      await this.saveTokenizer();
+      console.error('Error loading tokenizer:', error);
+      throw new Error('Tokenizer file not found or invalid. Please train the model first.');
     }
-  }
-
-  createBasicTokenizer() {
-    const basicVocab = ['<', '>', '/', '=', '"', "'", ' ', 'script', 'img', 'src', 'onerror', 'alert'];
-    const wordIndex = {};
-    const indexWord = {};
-    basicVocab.forEach((word, index) => {
-      wordIndex[word] = index + 1;
-      indexWord[index + 1] = word;
-    });
-    this.vocabSize = basicVocab.length + 1;
-    return { wordIndex, indexWord };
-  }
-
-  async saveTokenizer() {
-    await fs.writeFile(this.config.tokenizerPath, JSON.stringify(this.tokenizer, null, 2));
-  }
-
-  buildModel() {
-    const model = tf.sequential();
-    model.add(tf.layers.embedding({
-      inputDim: this.vocabSize,
-      outputDim: 128,
-      inputLength: this.config.maxLength
-    }));
-    model.add(tf.layers.lstm({ units: 64, returnSequences: false }));
-    model.add(tf.layers.dense({ units: this.vocabSize, activation: 'softmax' }));
-    model.compile({ optimizer: 'adam', loss: 'categoricalCrossentropy' });
-    return model;
   }
 
   async generatePayloads(batchSize = 32) {
@@ -94,7 +62,7 @@ class RNNAgent {
       const input = tf.tensor2d([paddedSequence], [1, this.config.maxLength]);
       const prediction = this.model.predict(input);
       const nextTokenIndex = this.sampleFromPrediction(prediction);
-      const nextToken = this.tokenizer.indexWord[nextTokenIndex];
+      const nextToken = this.tokenizer.indexToWord[nextTokenIndex];
       
       sequence.push(nextToken);
       
@@ -105,7 +73,7 @@ class RNNAgent {
   }
 
   padSequence(sequence) {
-    const paddedSequence = sequence.map(token => this.tokenizer.wordIndex[token] || 0);
+    const paddedSequence = sequence.map(token => this.tokenizer.wordToIndex[token] || 0);
     while (paddedSequence.length < this.config.maxLength) {
       paddedSequence.push(0);
     }
