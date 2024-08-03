@@ -1,9 +1,0 @@
-{
-    "maxPayloads": 2000,
-    "mlPayloadCount": 30,
-    "maxPayloadLength": 150,
-    "reportFile": "custom_xss_report.json",
-    "maxWorkers": 8,
-    "batchSize": 200,
-    "maxExecutionTime": 7200000
-  }
