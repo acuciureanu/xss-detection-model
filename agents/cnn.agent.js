@@ -1,98 +1,85 @@
 const tf = require('@tensorflow/tfjs-node-gpu');
-const fs = require('fs').promises;
-const path = require('path');
 
 class CNNAgent {
     constructor(model, tokenizer, config) {
-      this.model = model;
-      this.tokenizer = tokenizer;
-      this.config = config;
+        this.model = model;
+        this.tokenizer = tokenizer;
+        this.config = config;
     }
-  
+
     async generateSinglePayload(temperature = 0.8, maxLength = 100) {
-      let sequence = ['<'];
-      while (sequence.length < maxLength) {
-        const paddedSequence = this.padSequence(sequence);
-        const input = tf.tensor2d([paddedSequence], [1, this.config.maxLength]);
-        const prediction = this.model.predict(input);
-        const nextTokenIndex = this.sampleFromPrediction(prediction, temperature);
-        const nextToken = this.tokenizer.indexToWord[nextTokenIndex] || '';
-        
-        sequence.push(nextToken);
-        
-        if (nextToken === '>' || nextToken === '\n') {
-          if (this.isValidXSS(sequence.join(''))) {
-            break;
-          }
+        let sequence = ['<'];
+        while (sequence.length < maxLength) {
+            const paddedSequence = this.padSequence(sequence);
+            // Change this line to create a 2D tensor instead of 3D
+            const input = tf.tensor2d([paddedSequence], [1, this.config.maxLength]);
+            
+            console.log('Input tensor shape:', input.shape);
+            
+            let prediction;
+            try {
+                prediction = this.model.predict(input);
+                console.log('Prediction tensor shape:', prediction.shape);
+                console.log('Prediction values (first 10):', prediction.dataSync().slice(0, 10));
+            } catch (error) {
+                console.error('Error during model prediction:', error);
+                break;
+            }
+
+            const nextTokenIndex = this.sampleFromPrediction(prediction, temperature);
+            console.log('Next token index:', nextTokenIndex);
+
+            const nextToken = this.tokenizer.indexToWord[nextTokenIndex] || '';
+            console.log('Next token:', nextToken);
+            
+            sequence.push(nextToken);
+            console.log('Updated sequence:', sequence);
+            
+            if (nextToken === '>' || nextToken === '\n' || sequence.length >= maxLength) {
+                console.log('Ending condition met');
+                break;
+            }
+
+            // Dispose of tensors to free memory
+            input.dispose();
+            prediction.dispose();
         }
-        
-        if (sequence.length >= maxLength) {
-          break;
-        }
-      }
-  
-      return sequence.join('');
+
+        const payload = sequence.join('');
+        console.log('Final payload:', payload);
+        return payload;
     }
-  
-    sampleFromPrediction(prediction, temperature = 1.0) {
-      const logits = prediction.dataSync();
-      const probabilities = tf.softmax(tf.div(tf.tensor1d(logits), temperature)).dataSync();
-      
-      let sum = 0;
-      const sample = Math.random();
-      for (let i = 0; i < probabilities.length; i++) {
-        sum += probabilities[i];
-        if (sum > sample) {
-          return i;
-        }
-      }
-      return probabilities.length - 1;
-    }
-  
+
     padSequence(sequence) {
-      const padding = Array(this.config.maxLength - sequence.length).fill(this.tokenizer.wordToIndex['<PAD>']);
-      return padding.concat(sequence.map(token => this.tokenizer.wordToIndex[token] || this.tokenizer.wordToIndex['<UNK>']));
+        const paddedSequence = sequence.map(token => this.tokenizer.wordToIndex[token] || 0);
+        while (paddedSequence.length < this.config.maxLength) {
+            paddedSequence.push(0);
+        }
+        return paddedSequence;
     }
-  
+
+    sampleFromPrediction(prediction, temperature = 1.0) {
+        const logits = prediction.dataSync();
+        console.log('Logits (first 10):', logits.slice(0, 10));
+
+        const probabilities = tf.softmax(tf.div(tf.tensor1d(logits), temperature)).dataSync();
+        console.log('Probabilities (first 10):', probabilities.slice(0, 10));
+        
+        let sum = 0;
+        const sample = Math.random();
+        for (let i = 0; i < probabilities.length; i++) {
+            sum += probabilities[i];
+            if (sum > sample) {
+                return i;
+            }
+        }
+        return probabilities.length - 1;
+    }
+
     isValidXSS(payload) {
-      const lowerPayload = payload.toLowerCase();
-      const xssPatterns = [
-        '<script>',
-        'javascript:',
-        'onerror=',
-        'onload=',
-        'onmouseover=',
-        '<img',
-        '<iframe',
-        '<svg',
-        '<math',
-        '<body',
-        '<input',
-        '<link',
-        '<style',
-        'expression(',
-        'src=',
-        'href=',
-        'data:'
-      ];
-      
-      return xssPatterns.some(pattern => lowerPayload.includes(pattern));
+        const xssPatterns = ['<script', 'javascript:', 'onerror=', 'onload=', 'onclick=', '<img', '<iframe', '<svg', '<math'];
+        return xssPatterns.some(pattern => payload.toLowerCase().includes(pattern));
     }
-  
-    async generateMultiplePayloads(n, temperature = 0.8, maxLength = 100) {
-      const payloads = [];
-      for (let i = 0; i < n; i++) {
-        const payload = await this.generateSinglePayload(temperature, maxLength);
-        payloads.push(payload);
-      }
-      return payloads;
-    }
-  
-    async generateFuzzingPayloads(batchSize = 10, temperature = 0.8, maxLength = 100) {
-      const payloads = await this.generateMultiplePayloads(batchSize, temperature, maxLength);
-      return payloads.filter(payload => this.isValidXSS(payload));
-    }
-  }
-  
+}
 
 module.exports = { CNNAgent };

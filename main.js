@@ -69,7 +69,7 @@ async function main() {
     console.log('Starting inference with pre-trained model...');
     const model = await loadModel();
     const tokenizer = await loadTokenizer();
-    const dataset = await readCSV('XSS_dataset.csv');
+    const dataset = await readCSV('XSS_dataset_test.csv');
     await useModel(model, tokenizer, dataset);
     console.log('Inference completed successfully.');
   } catch (error) {

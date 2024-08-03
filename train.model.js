@@ -134,7 +134,7 @@ function createCNNModel(maxLength, vocabSize) {
 async function trainModel() {
   try {
     console.log('Loading and preprocessing data...');
-    const data = await readCSV('XSS_dataset.csv');
+    const data = await readCSV('XSS_dataset_training.csv');
     
     const sentences = data.map(row => preprocessSentence(row.Sentence));
     const labels = data.map(row => parseInt(row.Label));
